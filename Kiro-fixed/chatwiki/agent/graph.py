@@ -97,14 +97,17 @@ def make_nodes(skills: Dict[str, Any]) -> Dict[str, Any]:
 
         wiki_skill = _skill("history_memory")
         recent_modules = []
+        recent_chat = ""
         if wiki_skill:
             modules = wiki_skill.get_modules(state["workspace_id"])
             recent_modules = [m["topic"] for m in modules[:5]]
+            # 提供最近 5 轮对话帮助意图判断（区分闲聊追问 vs 知识追问）
+            recent_chat = wiki_skill.get_recent_context(state["workspace_id"], n=5)
 
         inp = SkillInput(
             query=state["query"],
             workspace_id=state["workspace_id"],
-            context={"recent_modules": recent_modules},
+            context={"recent_modules": recent_modules, "recent_chat": recent_chat},
         )
         out = skill.run(inp)
         intent = out.data.get("intent", "knowledge_query")
@@ -150,12 +153,15 @@ def make_nodes(skills: Dict[str, Any]) -> Dict[str, Any]:
         wiki_skill = _skill("history_memory")
         recent_context = ""
         if wiki_skill:
-            recent_context = wiki_skill.get_recent_context(state["workspace_id"], n=3)
+            recent_context = wiki_skill.get_recent_context(state["workspace_id"], n=5)
 
         inp = SkillInput(
             query=state["query"],
             workspace_id=state["workspace_id"],
-            context={"recent_context": recent_context},
+            context={
+                "recent_context": recent_context,
+                "intent": state.get("intent", "knowledge_query"),
+            },
         )
         out = skill.run(inp)
         steps.append("query_rewrite")

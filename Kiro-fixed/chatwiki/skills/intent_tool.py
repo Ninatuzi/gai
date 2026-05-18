@@ -36,9 +36,16 @@ class IntentSkill(BaseSkill):
     def run(self, skill_input: SkillInput) -> SkillOutput:
         query = skill_input.query
         recent_modules = skill_input.context.get("recent_modules", [])
+        recent_chat = skill_input.context.get("recent_chat", "")
 
         modules_text = ", ".join(recent_modules) if recent_modules else "（暂无历史话题）"
-        prompt = INTENT_PROMPT.format(recent_modules=modules_text, user_query=query)
+        
+        # 如果有最近对话记录，附加到 prompt 帮助判断
+        chat_context = ""
+        if recent_chat:
+            chat_context = f"\n\n## 最近几轮对话\n{recent_chat}"
+        
+        prompt = INTENT_PROMPT.format(recent_modules=modules_text, user_query=query) + chat_context
 
         try:
             out = self.llm.chat(prompt, max_tokens=500, temperature=0.0)
