@@ -197,21 +197,77 @@ class WikiMemorySkill(BaseSkill):
 
     def _get_or_create_module(self, workspace_id: str, query: str, is_followup: bool = False) -> str:
         """
-        判断归属模块：同话题→归已有，新话题→创建新的
-        所有问题都做话题判断（用改写后的 query），不区分 followup/knowledge
+        判断归属模块：用向量相似度在所有历史模块中找最匹配的。
+        1. 向量化 query，在 Milvus 中搜索所有模块
+        2. 如果最高相似度 > topic_merge_threshold → 用 LLM 确认是否归入
+        3. LLM 确认 same → 归入该模块
+        4. 否则创建新模块
         """
-        latest = self.mysql.get_latest_module(workspace_id)
+        modules = self.mysql.get_modules_by_workspace(workspace_id)
 
-        if latest is None:
+        if not modules:
             return self._create_new_module(workspace_id, query)
 
-        # 所有问题都做话题判断
+        # 向量检索所有模块，找最相似的
+        try:
+            query_vec = self.embedding.embed(query)
+            hits = self.milvus.search_modules(
+                workspace_id=workspace_id,
+                query_embedding=query_vec,
+                top_k=5,
+            )
+        except Exception as e:
+            logger.warning("话题归属向量检索失败: %s，fallback到最新模块", e)
+            latest = self.mysql.get_latest_module(workspace_id)
+            if latest:
+                return latest["module_id"]
+            return self._create_new_module(workspace_id, query)
+
+        if not hits:
+            return self._create_new_module(workspace_id, query)
+
+        # 取相似度最高的模块
+        best_hit = hits[0]
+        best_score = best_hit["score"]
+        topic_merge_threshold = 0.65  # 向量相似度门槛：低于此值直接创建新模块
+
+        if best_score < topic_merge_threshold:
+            logger.info("话题判断: 最高相似度 %.2f < %.2f，创建新模块", best_score, topic_merge_threshold)
+            return self._create_new_module(workspace_id, query)
+
+        # 相似度足够高（>= 0.65），用 LLM 精确判断
         is_same = self._judge_same_topic(
-            current_topic=latest["topic"],
-            current_summary=latest.get("summary") or latest["topic"],
+            current_topic=best_hit["topic"],
+            current_summary=best_hit.get("summary") or best_hit["topic"],
             user_query=query,
         )
-        return latest["module_id"] if is_same else self._create_new_module(workspace_id, query)
+
+        if is_same:
+            logger.info("话题判断: 归入模块 %s (topic=%s, score=%.2f)",
+                       best_hit["module_id"][:8], best_hit["topic"], best_score)
+            return best_hit["module_id"]
+
+        # LLM 判 new，但如果相似度非常高（> 0.85）仍然归入（LLM可能判错）
+        if best_score > 0.85:
+            logger.info("话题判断: LLM判new但相似度 %.2f > 0.85，强制归入模块 %s",
+                       best_score, best_hit["module_id"][:8])
+            return best_hit["module_id"]
+
+        # 检查第二、第三命中是否有更合适的（避免只看 top1）
+        for hit in hits[1:3]:
+            if hit["score"] < topic_merge_threshold:
+                break
+            is_same_alt = self._judge_same_topic(
+                current_topic=hit["topic"],
+                current_summary=hit.get("summary") or hit["topic"],
+                user_query=query,
+            )
+            if is_same_alt:
+                logger.info("话题判断: 归入备选模块 %s (topic=%s, score=%.2f)",
+                           hit["module_id"][:8], hit["topic"], hit["score"])
+                return hit["module_id"]
+
+        return self._create_new_module(workspace_id, query)
 
     def _create_new_module(self, workspace_id: str, first_query: str) -> str:
         topic = first_query[:20].replace("\n", " ")
@@ -229,10 +285,7 @@ class WikiMemorySkill(BaseSkill):
 
     def _judge_same_topic(self, current_topic: str, current_summary: str, user_query: str) -> bool:
         """
-        LLM 判断 + 向量相似度双重验证
-        - LLM 判 same → 归同一模块
-        - LLM 判 new 但向量相似度 > 0.85 → 还是归同一模块（LLM 可能判错）
-        - LLM 判 new 且向量相似度 < 0.85 → 确实是新话题
+        纯 LLM 判断（向量相似度已在 _get_or_create_module 中处理）
         """
         prompt = TOPIC_JUDGE_PROMPT.format(
             current_topic=current_topic,
@@ -242,27 +295,9 @@ class WikiMemorySkill(BaseSkill):
         try:
             out = self.llm.chat(prompt, max_tokens=500, temperature=0.0)
             last_line = out.strip().splitlines()[-1].strip().lower() if out.strip() else ""
-            llm_says_same = "same" in last_line
-
-            if llm_says_same:
-                return True
-
-            # LLM 说 new，用向量相似度兜底验证
-            try:
-                topic_vec = self.embedding.embed(f"{current_topic}。{current_summary[:200]}")
-                query_vec = self.embedding.embed(user_query)
-                # 计算余弦相似度
-                import numpy as np
-                sim = float(np.dot(topic_vec, query_vec) / (np.linalg.norm(topic_vec) * np.linalg.norm(query_vec) + 1e-8))
-                if sim > 0.85:
-                    logger.info("话题判断：LLM判new但向量相似度%.2f>0.85，归为same", sim)
-                    return True
-            except Exception as e:
-                logger.debug("向量兜底判断失败: %s", e)
-
-            return False
+            return "same" in last_line
         except Exception as e:
-            logger.warning("话题判断失败: %s", e)
+            logger.warning("话题判断LLM调用失败: %s", e)
             return True  # 失败时保守归到当前模块
 
     def _update_module_summary(self, module_id: str) -> None:
