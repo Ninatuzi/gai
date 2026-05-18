@@ -276,6 +276,7 @@ def make_nodes(skills: Dict[str, Any]) -> Dict[str, Any]:
             answer=state.get("answer", ""),
             knowledge=knowledge,
             intent=state.get("intent", "knowledge_query"),
+            match_query=state.get("rewritten_query"),
         )
         module_id = result.get("module_id")
         steps.append(f"wiki_write:module={module_id[:8] if module_id else 'N/A'}")

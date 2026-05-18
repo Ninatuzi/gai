@@ -119,18 +119,23 @@ class WikiMemorySkill(BaseSkill):
     # ============================================================
 
     def write(self, workspace_id: str, query: str, answer: str,
-              knowledge: List[str], intent: str = "knowledge_query") -> Dict[str, Any]:
+              knowledge: List[str], intent: str = "knowledge_query",
+              match_query: str = None) -> Dict[str, Any]:
         """
         将一轮对话写入 wiki：
         1. 判断归属模块（同话题 or 新话题）
         2. 写入 wiki_record
         3. 更新模块 summary + 向量
         
+        Args:
+            query: 用户原话，写入 wiki 存储（展示用）
+            match_query: 改写后的问题，用于话题归属的向量匹配（可选，默认用 query）
+        
         Returns: {"wiki_id": str, "module_id": str, "turn_number": int}
         """
-        # 1. 确定归属模块
-        # followup_query 直接归到当前模块（追问一定属于当前话题）
-        module_id = self._get_or_create_module(workspace_id, query, is_followup=(intent == "followup_query"))
+        # 1. 确定归属模块（用 match_query 做话题匹配，语义更完整）
+        effective_query = match_query or query
+        module_id = self._get_or_create_module(workspace_id, effective_query, is_followup=(intent == "followup_query"))
 
         # 2. 计算 turn_number
         turn_number = self.mysql.get_turn_count(workspace_id) + 1
