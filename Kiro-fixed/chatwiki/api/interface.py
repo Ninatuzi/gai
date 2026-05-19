@@ -121,47 +121,52 @@ class ChatWikiAgent:
 
     def ask_stream(self, workspace_id: str, query: str):
         """
-        流式版本：前面步骤正常执行，聚合阶段流式输出 token。
+        流式版本：手动执行前面步骤，聚合阶段流式输出 token。
+        避免跑完整 graph（会多一次非流式聚合+写入）。
         
         Yields: (token: str, is_final: bool, result: dict|None)
             - 流式输出时: (token, False, None)
             - 最后一次: ("", True, full_result_dict)
         """
         from chatwiki.skills.base import SkillInput
+        from chatwiki.agent.graph import make_nodes
 
-        # 1. 执行前面所有步骤（意图→改写→Wiki→RAG）—— 非流式
+        # 手动构建节点函数
+        nodes = make_nodes(self._skills)
+        
+        # 初始状态
         state = {
             "workspace_id": workspace_id,
             "query": query,
             "steps": [],
         }
 
-        # 手动执行图的前半部分节点
-        nodes = self.graph  # CompiledGraph
+        # Step 1: 意图识别
+        state.update(nodes["node_intent"](state))
 
-        # 用非流式方式跑完除了聚合以外的步骤
-        # 但 LangGraph 不容易拆开执行，所以换个思路：
-        # 先完整跑 graph（非流式），拿到中间状态，然后再用流式重新生成答案
-
-        # 方案：先跑完整 graph 拿到结果，然后用 aggregator 的 run_stream 重新流式生成
-        result = self.graph.invoke({
-            "workspace_id": workspace_id,
-            "query": query,
-            "steps": [],
-        })
-
-        # 如果是闲聊，直接返回（不重新生成）
-        if result.get("intent") == "chitchat":
-            yield result.get("answer", ""), True, result
+        # 如果是闲聊，走 fallback 直接返回
+        if state.get("intent") == "chitchat":
+            state.update(nodes["node_fallback"](state))
+            nodes["node_log_chat"](state)
+            yield state.get("answer", ""), True, state
             return
 
-        # 用流式重新生成答案（聚合步骤）
+        # Step 2: 问题改写
+        state.update(nodes["node_query_rewrite"](state))
+
+        # Step 3: Wiki 检索
+        state.update(nodes["node_wiki_search"](state))
+
+        # Step 4: RAG 检索
+        state.update(nodes["node_rag"](state))
+
+        # Step 5: 流式聚合（只执行一次）
         inp = SkillInput(
             query=query,
             workspace_id=workspace_id,
             context={
-                "wiki_context": result.get("wiki_context", ""),
-                "rag_context": result.get("rag_context", ""),
+                "wiki_context": state.get("wiki_context", ""),
+                "rag_context": state.get("rag_context", ""),
             },
         )
 
@@ -170,34 +175,38 @@ class ChatWikiAgent:
             full_answer += token
             yield token, False, None
 
-        # 更新 result 中的 answer 为流式生成的完整版本
-        result["answer"] = full_answer
+        state["answer"] = full_answer
+        steps = list(state.get("steps") or [])
+        steps.append("aggregation")
+        state["steps"] = steps
 
-        # 重新写入 wiki（用流式生成的完整答案）
-        rag_chunks = result.get("rag_chunks") or []
-        knowledge = [c.get("content", "") for c in rag_chunks if c.get("content")][:5] if result.get("rag_found") else []
+        # Step 6: 写入 Wiki
+        rag_chunks = state.get("rag_chunks") or []
+        knowledge = [c.get("content", "") for c in rag_chunks if c.get("content")][:5] if state.get("rag_found") else []
 
         write_result = self.wiki_skill.write(
             workspace_id=workspace_id,
             query=query,
             answer=full_answer,
             knowledge=knowledge,
-            intent=result.get("intent", "knowledge_query"),
-            match_query=result.get("rewritten_query"),
+            intent=state.get("intent", "knowledge_query"),
+            match_query=state.get("rewritten_query"),
         )
-        result["wiki_id"] = write_result.get("wiki_id")
-        result["module_id"] = write_result.get("module_id")
-        result["turn_number"] = write_result.get("turn_number", 0)
+        state["wiki_id"] = write_result.get("wiki_id")
+        state["module_id"] = write_result.get("module_id")
+        state["turn_number"] = write_result.get("turn_number", 0)
+        steps.append(f"wiki_write:module={write_result.get('module_id', '')[:8]}")
+        state["steps"] = steps
 
-        # 记录 chat_log
+        # Step 7: 记录 chat_log
         self.wiki_skill.log_chat(
             workspace_id=workspace_id,
             query=query,
             answer=full_answer,
-            intent=result.get("intent", ""),
+            intent=state.get("intent", ""),
         )
 
-        yield "", True, result
+        yield "", True, state
 
     # ============================================================
     # 数据查看
