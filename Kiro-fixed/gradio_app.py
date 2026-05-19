@@ -52,7 +52,7 @@ def chat_fn(
     返回：更新后的 chat_history, 指标面板各字段, workspace_id
     """
     if not user_message.strip():
-        return chat_history, "", "", "", "", "", "", "", workspace_id
+        return chat_history, "", "", "", "", "", "", "", "", workspace_id
 
     ag = get_agent()
 
@@ -158,14 +158,7 @@ def _format_modules_markdown(ag: ChatWikiAgent, workspace_id: str) -> str:
 # ============================================================
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(
-        title="ChatWiki - 对话记忆检索 Agent",
-        theme=gr.themes.Soft(),
-        css="""
-        .metric-label { font-weight: bold; color: #333; margin-bottom: 2px; }
-        .metric-value { font-size: 14px; padding: 4px 8px; background: #f0f4ff; border-radius: 4px; }
-        """
-    ) as app:
+    with gr.Blocks(title="ChatWiki - 对话记忆检索 Agent") as app:
         # 标题
         gr.Markdown("# ChatWiki - 对话级记忆检索 Agent")
         gr.Markdown("基于 LangGraph 的多轮对话知识管理系统 | 话题自动分组 | Wiki + RAG 混合检索")
@@ -179,7 +172,6 @@ def build_app() -> gr.Blocks:
                 chatbot = gr.Chatbot(
                     label="对话",
                     height=520,
-                    type="messages",
                     show_copy_button=True,
                 )
                 with gr.Row():
@@ -192,7 +184,7 @@ def build_app() -> gr.Blocks:
                     send_btn = gr.Button("发送", variant="primary", scale=1)
                 with gr.Row():
                     new_ws_btn = gr.Button("新建对话", variant="secondary", size="sm")
-                    gr.Markdown("*提示：新建对话会创建新的 workspace，之前的记忆不会丢失*", elem_classes="hint")
+                    gr.Markdown("*提示：新建对话会创建新的 workspace，之前的记忆不会丢失*")
 
             # ========== 右侧：监测面板 ==========
             with gr.Column(scale=3):
