@@ -381,15 +381,8 @@ def build_graph(skills: Dict[str, Any]):
     # 知识问答路径：改写 → wiki 检索
     builder.add_edge("node_query_rewrite", "node_wiki_search")
 
-    # Wiki 路由：命中 → 聚合，未命中 → RAG → 聚合
-    builder.add_conditional_edges(
-        "node_wiki_search",
-        route_by_wiki,
-        {
-            "wiki_hit": "node_aggregate",
-            "need_rag": "node_rag",
-        },
-    )
+    # Wiki 检索后无论是否命中，都走 RAG 补充
+    builder.add_edge("node_wiki_search", "node_rag")
     builder.add_edge("node_rag", "node_aggregate")
 
     # 聚合 → 写入 wiki → log_chat → END
