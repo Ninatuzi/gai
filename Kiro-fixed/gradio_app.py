@@ -1,8 +1,8 @@
 """
-ChatWiki Gradio 可视化界面（多会话 + 流式输出）
+ChatWiki Gradio 可视化界面（多会话 + 流式输出 + 会话持久化）
 
 功能：
-- 左侧侧边栏：会话列表（新建/切换/保留历史）
+- 左侧侧边栏：会话列表（新建/切换/保留历史，重启不丢失）
 - 中间：对话区（Chatbot，流式输出）
 - 右侧：监测指标面板
 
@@ -10,7 +10,9 @@ ChatWiki Gradio 可视化界面（多会话 + 流式输出）
     python gradio_app.py
 """
 
+import json
 import logging
+import os
 import time
 from typing import Any, Dict, List
 
@@ -25,11 +27,37 @@ logging.basicConfig(
 logger = logging.getLogger("chatwiki.gradio")
 
 # ============================================================
-# 全局 Agent 实例 + 会话管理
+# 全局 Agent 实例 + 会话管理（持久化）
 # ============================================================
 agent: ChatWikiAgent = None
 # 存储所有会话: {workspace_id: {"name": str, "history": list}}
 sessions: Dict[str, Dict] = {}
+
+# 会话持久化文件路径
+SESSIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "gradio_sessions.json")
+
+
+def _save_sessions():
+    """保存会话列表到文件"""
+    os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
+    try:
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning("保存会话文件失败: %s", e)
+
+
+def _load_sessions():
+    """从文件加载会话列表"""
+    global sessions
+    if os.path.exists(SESSIONS_FILE):
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                sessions = json.load(f)
+            logger.info("恢复 %d 个历史会话", len(sessions))
+        except Exception as e:
+            logger.warning("加载会话文件失败: %s", e)
+            sessions = {}
 
 
 def get_agent() -> ChatWikiAgent:
@@ -47,6 +75,7 @@ def create_new_session(name=None):
     ws_id = ag.create_workspace(f"gradio_{int(time.time())}")
     session_name = name or f"会话 {len(sessions) + 1}"
     sessions[ws_id] = {"name": session_name, "history": []}
+    _save_sessions()
     return ws_id
 
 
@@ -54,16 +83,15 @@ def get_session_list():
     """返回会话列表给 Radio 组件"""
     if not sessions:
         return []
-    return [f"{sessions[ws_id]['name']}" for ws_id in sessions]
+    return [sessions[ws_id]["name"] for ws_id in sessions]
 
 
-def get_ws_id_by_index(index):
-    """根据 Radio 选中的索引获取 workspace_id"""
-    if index is None or not sessions:
+def get_ws_id_by_name(name):
+    """根据会话名称获取 workspace_id"""
+    if name is None or not sessions:
         return None
-    ws_ids = list(sessions.keys())
-    for i, ws_id in enumerate(ws_ids):
-        if sessions[ws_id]["name"] == index:
+    for ws_id, info in sessions.items():
+        if info["name"] == name:
             return ws_id
     return None
 
@@ -112,8 +140,9 @@ def chat_fn_stream(user_message, chat_history, workspace_id):
     if result is None:
         result = {}
 
-    # 保存到 session
+    # 保存到 session 并持久化
     sessions[workspace_id]["history"] = chat_history
+    _save_sessions()
 
     # 组装指标
     intent = result.get("intent", "")
@@ -171,11 +200,11 @@ def new_session_fn():
 
 def switch_session_fn(selected_name, workspace_id):
     """点击侧边栏切换会话"""
-    ws_id = get_ws_id_by_index(selected_name)
+    ws_id = get_ws_id_by_name(selected_name)
     if ws_id is None:
         return [], workspace_id, "", "", "", "", "", "", ""
 
-    history = sessions[ws_id]["history"]
+    history = sessions[ws_id].get("history", [])
     ag = get_agent()
     modules_md = _format_modules_markdown(ag, ws_id)
 
@@ -203,6 +232,10 @@ def _format_modules_markdown(ag, workspace_id):
 # ============================================================
 
 def build_app():
+    # 启动时加载历史会话
+    _load_sessions()
+    initial_choices = get_session_list()
+
     with gr.Blocks(title="ChatWiki") as app:
         gr.Markdown("# ChatWiki - 对话级记忆检索 Agent")
 
@@ -214,7 +247,7 @@ def build_app():
                 gr.Markdown("### 会话列表")
                 new_session_btn = gr.Button("+ 新建会话", variant="primary", size="sm")
                 session_radio = gr.Radio(
-                    choices=[],
+                    choices=initial_choices,
                     label="",
                     interactive=True,
                 )
