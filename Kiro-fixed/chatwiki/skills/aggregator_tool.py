@@ -59,6 +59,31 @@ class AggregatorSkill(BaseSkill):
 
         return SkillOutput(success=True, data={"answer": answer}, message="回答已生成")
 
+    def run_stream(self, skill_input: SkillInput):
+        """流式版本：yield 每个 token，供 Gradio streaming 使用"""
+        query = skill_input.query
+        wiki_context = skill_input.context.get("wiki_context", "")
+        rag_context = skill_input.context.get("rag_context", "")
+
+        has_wiki = bool(wiki_context)
+        has_rag = bool(rag_context)
+
+        if not has_wiki and not has_rag:
+            prompt = ANSWER_DIRECT_PROMPT.format(user_query=query)
+        else:
+            prompt = ANSWER_AGGREGATE_PROMPT.format(
+                wiki_context=wiki_context or "（无）",
+                rag_context=rag_context or "（无）",
+                user_query=query,
+            )
+
+        try:
+            for token in self.llm.chat_stream(prompt, max_tokens=2048):
+                yield token
+        except Exception as e:
+            logger.error("流式聚合失败: %s", e)
+            yield f"抱歉，生成回答时出错: {e}"
+
     def _direct_answer(self, query: str) -> str:
         prompt = ANSWER_DIRECT_PROMPT.format(user_query=query)
         try:

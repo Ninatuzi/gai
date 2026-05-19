@@ -1,9 +1,9 @@
 """
-ChatWiki Gradio 可视化界面
+ChatWiki Gradio 可视化界面（流式输出版）
 
 功能：
-- 左侧：对话区（Chatbot）
-- 右侧：监测指标面板（意图/改写/Wiki命中/RAG命中/模块归属/耗时/步骤链路/话题模块列表）
+- 左侧：对话区（Chatbot，流式输出）
+- 右侧：监测指标面板
 
 启动：
     python gradio_app.py
@@ -39,43 +39,59 @@ def get_agent() -> ChatWikiAgent:
 
 
 # ============================================================
-# 核心交互函数
+# 流式交互函数
 # ============================================================
 
-def chat_fn(
-    user_message: str,
-    chat_history: List[Dict[str, str]],
-    workspace_id: str,
-):
+def chat_fn_stream(user_message, chat_history, workspace_id):
     """
-    用户发送消息后的处理函数。
-    返回：更新后的 chat_history, 指标面板各字段, workspace_id
+    流式输出版本：前面步骤一次性执行完，答案逐字输出。
+    Gradio generator 模式。
     """
     if not user_message.strip():
-        return chat_history, "", "", "", "", "", "", "", "", workspace_id
+        yield chat_history, "", "", "", "", "", "", "", "", workspace_id
+        return
 
     ag = get_agent()
 
-    # 如果没有 workspace，自动创建
     if not workspace_id:
         workspace_id = ag.create_workspace("gradio_user")
 
-    # 计时
-    t0 = time.time()
-    result = ag.ask(workspace_id=workspace_id, query=user_message)
-    elapsed = time.time() - t0
-
-    answer = result.get("answer", "（无回答）")
-
-    # 更新对话历史
+    # 添加用户消息
     chat_history = chat_history or []
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": answer})
+
+    # 先添加一个空的 assistant 消息占位
+    chat_history.append({"role": "assistant", "content": "思考中..."})
+
+    # 先 yield 一次，让用户看到"思考中"
+    yield chat_history, "处理中...", "", "", "", "", "", "", "", workspace_id
+
+    t0 = time.time()
+    full_answer = ""
+    result = None
+
+    for token, is_final, final_result in ag.ask_stream(workspace_id=workspace_id, query=user_message):
+        if is_final:
+            result = final_result
+            if token:  # 闲聊一次性返回
+                full_answer = token
+                chat_history[-1]["content"] = full_answer
+        else:
+            full_answer += token
+            chat_history[-1]["content"] = full_answer
+
+        # 流式 yield（每个 token 都更新界面）
+        if not is_final:
+            yield chat_history, "", "", "", "", "", "", "", "", workspace_id
+
+    elapsed = time.time() - t0
+
+    if result is None:
+        result = {}
 
     # ---- 组装指标 ----
     intent = result.get("intent", "")
     rewritten = result.get("rewritten_query", "")
-    # 如果改写后和原问题一样，显示"未改写"
     if rewritten == user_message:
         rewrite_display = "未改写（问题已完整）"
     else:
@@ -98,7 +114,6 @@ def chat_fn(
     module_id = result.get("module_id", "")
     module_display = "无（闲聊）"
     if module_id:
-        # 查询模块名称
         modules = ag.get_modules(workspace_id)
         for m in modules:
             if m["module_id"] == module_id:
@@ -107,27 +122,18 @@ def chat_fn(
         else:
             module_display = f"{module_id[:8]}..."
 
-    # 耗时
     time_display = f"{elapsed:.1f}s"
 
-    # 执行步骤
     steps = result.get("steps", [])
-    steps_display = " → ".join(steps) if steps else "无"
+    steps_display = " -> ".join(steps) if steps else ""
 
-    # 话题模块列表
     modules_md = _format_modules_markdown(ag, workspace_id)
 
-    return (
-        chat_history,
-        intent,
-        rewrite_display,
-        wiki_hit_str,
-        rag_hit_str,
-        module_display,
-        time_display,
-        steps_display,
-        modules_md,
-        workspace_id,
+    # 最终 yield（带完整指标）
+    yield (
+        chat_history, intent, rewrite_display, wiki_hit_str,
+        rag_hit_str, module_display, time_display, steps_display,
+        modules_md, workspace_id,
     )
 
 
@@ -135,21 +141,19 @@ def new_workspace_fn():
     """创建新 workspace，清空对话"""
     ag = get_agent()
     ws_id = ag.create_workspace(f"gradio_{int(time.time())}")
-    return [], ws_id, "", "", "", "", "", "", "暂无话题模块"
+    return [], ws_id, "", "", "", "", "", "", ""
 
 
-def _format_modules_markdown(ag: ChatWikiAgent, workspace_id: str) -> str:
-    """格式化话题模块列表为 Markdown"""
+def _format_modules_markdown(ag, workspace_id):
     modules = ag.get_modules(workspace_id)
     if not modules:
-        return "暂无话题模块"
-
+        return ""
     lines = []
     for i, m in enumerate(modules, 1):
-        topic = m.get("topic", "未命名")
+        topic = m.get("topic", "")
         wiki_count = m.get("wiki_count", 0)
         summary = m.get("summary", "")
-        lines.append(f"**{i}. {topic}** （{wiki_count}条wiki）")
+        lines.append(f"**{i}. {topic}** ({wiki_count}条wiki)")
         if summary:
             lines.append(f"   {summary[:80]}")
         lines.append("")
@@ -160,155 +164,67 @@ def _format_modules_markdown(ag: ChatWikiAgent, workspace_id: str) -> str:
 # Gradio 界面构建
 # ============================================================
 
-def build_app() -> gr.Blocks:
-    with gr.Blocks(title="ChatWiki - 对话记忆检索 Agent") as app:
-        # 标题
+def build_app():
+    with gr.Blocks(title="ChatWiki") as app:
         gr.Markdown("# ChatWiki - 对话级记忆检索 Agent")
-        gr.Markdown("基于 LangGraph 的多轮对话知识管理系统 | 话题自动分组 | Wiki + RAG 混合检索")
+        gr.Markdown("基于 LangGraph | 话题自动分组 | Wiki + RAG 混合检索 | 流式输出")
 
-        # 隐藏的 workspace_id state
         workspace_state = gr.State(value="")
 
         with gr.Row():
-            # ========== 左侧：对话区 ==========
             with gr.Column(scale=7):
-                chatbot = gr.Chatbot(
-                    label="对话",
-                    height=520,
-                    show_copy_button=True,
-                )
+                chatbot = gr.Chatbot(label="对话", height=520)
                 with gr.Row():
                     msg_input = gr.Textbox(
-                        label="输入问题",
                         placeholder="输入问题后按 Enter 发送...",
-                        scale=8,
-                        show_label=False,
+                        scale=8, show_label=False,
                     )
                     send_btn = gr.Button("发送", variant="primary", scale=1)
                 with gr.Row():
                     new_ws_btn = gr.Button("新建对话", variant="secondary", size="sm")
-                    gr.Markdown("*提示：新建对话会创建新的 workspace，之前的记忆不会丢失*")
 
-            # ========== 右侧：监测面板 ==========
             with gr.Column(scale=3):
-                gr.Markdown("### 当前轮监测指标")
-
-                with gr.Group():
-                    intent_display = gr.Textbox(
-                        label="意图识别",
-                        value="",
-                        interactive=False,
-                        max_lines=1,
-                    )
-                    rewrite_display = gr.Textbox(
-                        label="问题改写/增强",
-                        value="",
-                        interactive=False,
-                        max_lines=2,
-                    )
-
+                gr.Markdown("### 监测指标")
+                intent_display = gr.Textbox(label="意图识别", interactive=False, max_lines=1)
+                rewrite_display = gr.Textbox(label="问题改写/增强", interactive=False, max_lines=2)
                 with gr.Row():
-                    wiki_display = gr.Textbox(
-                        label="Wiki 命中",
-                        value="",
-                        interactive=False,
-                        max_lines=1,
-                    )
-                    rag_display = gr.Textbox(
-                        label="RAG 命中",
-                        value="",
-                        interactive=False,
-                        max_lines=1,
-                    )
-
+                    wiki_display = gr.Textbox(label="Wiki 命中", interactive=False, max_lines=1)
+                    rag_display = gr.Textbox(label="RAG 命中", interactive=False, max_lines=1)
                 with gr.Row():
-                    module_display = gr.Textbox(
-                        label="归属模块",
-                        value="",
-                        interactive=False,
-                        max_lines=1,
-                    )
-                    time_display = gr.Textbox(
-                        label="耗时",
-                        value="",
-                        interactive=False,
-                        max_lines=1,
-                    )
-
-                steps_display = gr.Textbox(
-                    label="执行步骤链路",
-                    value="",
-                    interactive=False,
-                    max_lines=3,
-                )
-
+                    module_display = gr.Textbox(label="归属模块", interactive=False, max_lines=1)
+                    time_display = gr.Textbox(label="耗时", interactive=False, max_lines=1)
+                steps_display = gr.Textbox(label="执行步骤", interactive=False, max_lines=3)
                 gr.Markdown("### 话题模块列表")
-                modules_display = gr.Markdown(value="暂无话题模块")
+                modules_display = gr.Markdown(value="")
 
-        # ========== 事件绑定 ==========
-        # 输出列表（跟 chat_fn 返回值顺序一致）
         outputs = [
-            chatbot,
-            intent_display,
-            rewrite_display,
-            wiki_display,
-            rag_display,
-            module_display,
-            time_display,
-            steps_display,
-            modules_display,
-            workspace_state,
+            chatbot, intent_display, rewrite_display, wiki_display,
+            rag_display, module_display, time_display, steps_display,
+            modules_display, workspace_state,
         ]
 
-        # Enter 发送
         msg_input.submit(
-            fn=chat_fn,
+            fn=chat_fn_stream,
             inputs=[msg_input, chatbot, workspace_state],
             outputs=outputs,
-        ).then(
-            fn=lambda: "",
-            outputs=msg_input,
-        )
+        ).then(fn=lambda: "", outputs=msg_input)
 
-        # 点击发送按钮
         send_btn.click(
-            fn=chat_fn,
+            fn=chat_fn_stream,
             inputs=[msg_input, chatbot, workspace_state],
             outputs=outputs,
-        ).then(
-            fn=lambda: "",
-            outputs=msg_input,
-        )
+        ).then(fn=lambda: "", outputs=msg_input)
 
-        # 新建对话
         new_ws_btn.click(
             fn=new_workspace_fn,
-            outputs=[
-                chatbot,
-                workspace_state,
-                intent_display,
-                rewrite_display,
-                wiki_display,
-                rag_display,
-                module_display,
-                time_display,
-                steps_display,
-                modules_display,
-            ],
+            outputs=[chatbot, workspace_state, intent_display, rewrite_display,
+                     wiki_display, rag_display, module_display, time_display,
+                     steps_display, modules_display],
         )
 
     return app
 
 
-# ============================================================
-# 入口
-# ============================================================
-
 if __name__ == "__main__":
     app = build_app()
-    app.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True,
-    )
+    app.launch(server_name="0.0.0.0", server_port=7860, share=False, show_error=True)
