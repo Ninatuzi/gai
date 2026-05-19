@@ -4,7 +4,7 @@ ChatWiki Gradio 可视化界面（多会话 + 流式输出 + 会话持久化）
 功能：
 - 左侧侧边栏：会话列表（新建/切换/保留历史，重启不丢失）
 - 中间：对话区（Chatbot，流式输出）
-- 右侧：监测指标面板
+- 右侧：监测指标面板（流结束后刷新）
 
 启动：
     python gradio_app.py
@@ -30,15 +30,14 @@ logger = logging.getLogger("chatwiki.gradio")
 # 全局 Agent 实例 + 会话管理（持久化）
 # ============================================================
 agent: ChatWikiAgent = None
-# 存储所有会话: {workspace_id: {"name": str, "history": list}}
 sessions: Dict[str, Dict] = {}
+# 存最近一次问答的指标，供 .then() 回调读取
+last_metrics: Dict[str, str] = {}
 
-# 会话持久化文件路径
 SESSIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "gradio_sessions.json")
 
 
 def _save_sessions():
-    """保存会话列表到文件"""
     os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
     try:
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
@@ -48,7 +47,6 @@ def _save_sessions():
 
 
 def _load_sessions():
-    """从文件加载会话列表"""
     global sessions
     if os.path.exists(SESSIONS_FILE):
         try:
@@ -70,7 +68,6 @@ def get_agent() -> ChatWikiAgent:
 
 
 def create_new_session(name=None):
-    """创建新会话，返回 workspace_id"""
     ag = get_agent()
     ws_id = ag.create_workspace(f"gradio_{int(time.time())}")
     session_name = name or f"会话 {len(sessions) + 1}"
@@ -80,14 +77,12 @@ def create_new_session(name=None):
 
 
 def get_session_list():
-    """返回会话列表给 Radio 组件"""
     if not sessions:
         return []
     return [sessions[ws_id]["name"] for ws_id in sessions]
 
 
 def get_ws_id_by_name(name):
-    """根据会话名称获取 workspace_id"""
     if name is None or not sessions:
         return None
     for ws_id, info in sessions.items():
@@ -97,18 +92,20 @@ def get_ws_id_by_name(name):
 
 
 # ============================================================
-# 流式交互函数
+# 流式交互：只更新 chatbot + workspace_state
 # ============================================================
 
 def chat_fn_stream(user_message, chat_history, workspace_id):
-    """流式输出版本"""
+    """流式输出：只负责更新对话区，指标在 .then() 里更新"""
+    global last_metrics
+
     if not user_message.strip():
-        yield chat_history, "", "", "", "", "", "", "", "", workspace_id
+        last_metrics = {}
+        yield chat_history, workspace_id
         return
 
     ag = get_agent()
 
-    # 如果没有 workspace，自动创建一个
     if not workspace_id or workspace_id not in sessions:
         workspace_id = create_new_session()
 
@@ -116,7 +113,7 @@ def chat_fn_stream(user_message, chat_history, workspace_id):
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": "思考中..."})
 
-    yield chat_history, "处理中...", "", "", "", "", "", "", "", workspace_id
+    yield chat_history, workspace_id
 
     t0 = time.time()
     full_answer = ""
@@ -133,18 +130,17 @@ def chat_fn_stream(user_message, chat_history, workspace_id):
             chat_history[-1]["content"] = full_answer
 
         if not is_final:
-            yield chat_history, "", "", "", "", "", "", "", "", workspace_id
+            yield chat_history, workspace_id
 
     elapsed = time.time() - t0
-
     if result is None:
         result = {}
 
-    # 保存到 session 并持久化
+    # 保存对话历史
     sessions[workspace_id]["history"] = chat_history
     _save_sessions()
 
-    # 组装指标
+    # 组装指标存到全局变量
     intent = result.get("intent", "")
     rewritten = result.get("rewritten_query", "")
     if rewritten == user_message:
@@ -179,15 +175,42 @@ def chat_fn_stream(user_message, chat_history, workspace_id):
     steps_display = " -> ".join(steps) if steps else ""
     modules_md = _format_modules_markdown(ag, workspace_id)
 
-    yield (
-        chat_history, intent, rewrite_display, wiki_hit_str,
-        rag_hit_str, module_display, time_display, steps_display,
-        modules_md, workspace_id,
+    last_metrics = {
+        "intent": intent,
+        "rewrite": rewrite_display,
+        "wiki": wiki_hit_str,
+        "rag": rag_hit_str,
+        "module": module_display,
+        "time": time_display,
+        "steps": steps_display,
+        "modules_md": modules_md,
+    }
+
+    # 最终 yield
+    yield chat_history, workspace_id
+
+
+def get_last_metrics():
+    """流式结束后被 .then() 调用，更新指标面板 + 清空输入框"""
+    m = last_metrics
+    return (
+        m.get("intent", ""),
+        m.get("rewrite", ""),
+        m.get("wiki", ""),
+        m.get("rag", ""),
+        m.get("module", ""),
+        m.get("time", ""),
+        m.get("steps", ""),
+        m.get("modules_md", ""),
+        "",  # 清空输入框
     )
 
 
+# ============================================================
+# 其他回调
+# ============================================================
+
 def new_session_fn():
-    """点击新建会话"""
     ws_id = create_new_session()
     choices = get_session_list()
     selected = sessions[ws_id]["name"]
@@ -199,7 +222,6 @@ def new_session_fn():
 
 
 def switch_session_fn(selected_name, workspace_id):
-    """点击侧边栏切换会话"""
     ws_id = get_ws_id_by_name(selected_name)
     if ws_id is None:
         return [], workspace_id, "", "", "", "", "", "", ""
@@ -232,7 +254,6 @@ def _format_modules_markdown(ag, workspace_id):
 # ============================================================
 
 def build_app():
-    # 启动时加载历史会话
     _load_sessions()
     initial_choices = get_session_list()
 
@@ -278,24 +299,35 @@ def build_app():
                 modules_display = gr.Markdown(value="")
 
         # ========== 事件绑定 ==========
-        chat_outputs = [
-            chatbot, intent_display, rewrite_display, wiki_display,
+        # 流式只更新 chatbot + workspace
+        stream_outputs = [chatbot, workspace_state]
+
+        # 指标 + 清空输入框（流结束后触发）
+        metric_outputs = [
+            intent_display, rewrite_display, wiki_display,
             rag_display, module_display, time_display, steps_display,
-            modules_display, workspace_state,
+            modules_display, msg_input,
         ]
 
-        # 发送消息
+        # Enter 发送
         msg_input.submit(
             fn=chat_fn_stream,
             inputs=[msg_input, chatbot, workspace_state],
-            outputs=chat_outputs,
-        ).then(fn=lambda: "", outputs=msg_input)
+            outputs=stream_outputs,
+        ).then(
+            fn=get_last_metrics,
+            outputs=metric_outputs,
+        )
 
+        # 点击发送
         send_btn.click(
             fn=chat_fn_stream,
             inputs=[msg_input, chatbot, workspace_state],
-            outputs=chat_outputs,
-        ).then(fn=lambda: "", outputs=msg_input)
+            outputs=stream_outputs,
+        ).then(
+            fn=get_last_metrics,
+            outputs=metric_outputs,
+        )
 
         # 新建会话
         new_session_btn.click(
