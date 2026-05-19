@@ -234,7 +234,7 @@ class WikiMemorySkill(BaseSkill):
         # 取相似度最高的模块
         best_hit = hits[0]
         best_score = best_hit["score"]
-        topic_merge_threshold = 0.65  # 向量相似度门槛：低于此值直接创建新模块
+        topic_merge_threshold = 0.55  # 向量相似度门槛：低于此值直接创建新模块
 
         if best_score < topic_merge_threshold:
             logger.info("话题判断: 最高相似度 %.2f < %.2f，创建新模块", best_score, topic_merge_threshold)
