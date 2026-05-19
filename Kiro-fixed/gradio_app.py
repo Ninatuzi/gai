@@ -87,14 +87,12 @@ def chat_fn(
         wiki_hit_str = f"命中 {result.get('wiki_modules_hit', 0)} 模块 / {result.get('wiki_count', 0)} 条wiki"
 
     # RAG 命中
-    rag_hit_str = "未调用（Wiki已命中）"
     if result.get("intent") == "chitchat":
         rag_hit_str = "未调用（闲聊）"
-    elif not result.get("wiki_found"):
-        if result.get("rag_found"):
-            rag_hit_str = f"命中 {result.get('rag_chunks_count', 0)} 条"
-        else:
-            rag_hit_str = "已调用，未命中"
+    elif result.get("rag_found"):
+        rag_hit_str = f"命中 {result.get('rag_chunks_count', 0)} 条"
+    else:
+        rag_hit_str = "未命中"
 
     # 归属模块
     module_id = result.get("module_id", "")
