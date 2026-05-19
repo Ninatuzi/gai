@@ -221,6 +221,39 @@ def new_session_fn():
     )
 
 
+def delete_session_fn(selected_name, workspace_id):
+    """删除选中的会话（workspace + 数据 + 向量）"""
+    ws_id = get_ws_id_by_name(selected_name)
+    if ws_id is None:
+        choices = get_session_list()
+        return [], workspace_id, gr.update(choices=choices, value=None), "", "", "", "", "", "", ""
+
+    # 删除 workspace 数据（JSON + Milvus）
+    try:
+        ag = get_agent()
+        ag.delete_workspace(ws_id)
+    except Exception as e:
+        logger.warning("删除 workspace 失败: %s", e)
+
+    # 从 sessions 移除
+    sessions.pop(ws_id, None)
+    _save_sessions()
+
+    # 更新 UI
+    choices = get_session_list()
+    # 如果删的是当前会话，清空显示
+    new_ws_id = "" if ws_id == workspace_id else workspace_id
+    new_history = []
+    if new_ws_id and new_ws_id in sessions:
+        new_history = sessions[new_ws_id].get("history", [])
+
+    return (
+        new_history, new_ws_id,
+        gr.update(choices=choices, value=None),
+        "", "", "", "", "", "", "",
+    )
+
+
 def switch_session_fn(selected_name, workspace_id):
     ws_id = get_ws_id_by_name(selected_name)
     if ws_id is None:
@@ -267,6 +300,7 @@ def build_app():
             with gr.Column(scale=2, min_width=180):
                 gr.Markdown("### 会话列表")
                 new_session_btn = gr.Button("+ 新建会话", variant="primary", size="sm")
+                del_session_btn = gr.Button("- 删除会话", variant="stop", size="sm")
                 session_radio = gr.Radio(
                     choices=initial_choices,
                     label="",
@@ -332,6 +366,17 @@ def build_app():
         # 新建会话
         new_session_btn.click(
             fn=new_session_fn,
+            outputs=[
+                chatbot, workspace_state, session_radio,
+                intent_display, rewrite_display, wiki_display,
+                rag_display, module_display, time_display, steps_display,
+            ],
+        )
+
+        # 删除会话
+        del_session_btn.click(
+            fn=delete_session_fn,
+            inputs=[session_radio, workspace_state],
             outputs=[
                 chatbot, workspace_state, session_radio,
                 intent_display, rewrite_display, wiki_display,
