@@ -1,17 +1,17 @@
 """
 Skill: History Memory（Wiki）
 完整的历史记忆技能：
-- Module 话题分组管理
-- 向量检索相关模块
-- 返回 wiki 列表（Q+A+Knowledge 格式）
-- 写入新的 wiki 记录
+- Module 话题分组管理（第一级检索）
+- Wiki summary 向量精筛（第二级检索）
+- 返回命中 wiki 的 knowledge 字段 + summary
+- 写入新的 wiki 记录（含 summary 向量化）
 """
 
 import logging
 from typing import Any, Dict, List, Optional
 
 from chatwiki.config import get_settings
-from chatwiki.config.prompts import MODULE_SUMMARY_PROMPT, TOPIC_JUDGE_PROMPT
+from chatwiki.config.prompts import MODULE_SUMMARY_PROMPT, TOPIC_JUDGE_PROMPT, WIKI_SUMMARY_PROMPT
 from chatwiki.models import EmbeddingClient, LLMClient
 from chatwiki.skills.base import BaseSkill, SkillInput, SkillOutput
 from chatwiki.storage import MilvusClient, MySQLClient
@@ -21,14 +21,15 @@ logger = logging.getLogger(__name__)
 
 class WikiMemorySkill(BaseSkill):
     """
-    History Memory Skill
+    History Memory Skill（两级检索版）
     
     检索模式 (run):
-        输入: query + workspace_id
-        输出: 相关的历史 wiki 列表 + 格式化上下文
+        第一级: 向量搜索 Module（找相关话题模块）
+        第二级: 在命中 Module 内向量搜索 Wiki summary（找最相关的具体 wiki）
+        返回: 命中 wiki 的 knowledge + summary + answer
 
     写入模式 (write):
-        将新的 Q+A+Knowledge 写入 wiki，自动归到对应话题模块
+        生成 wiki summary → 向量化存入 Milvus → 写入 JSON → 更新模块摘要
     """
 
     def __init__(self, mysql: MySQLClient, milvus: MilvusClient,
@@ -45,20 +46,18 @@ class WikiMemorySkill(BaseSkill):
 
     @property
     def description(self) -> str:
-        return "从历史对话记忆中检索相关信息（Wiki格式：Q+A+Knowledge），支持话题自动分组"
+        return "两级检索：Module级找话题 → Wiki级找具体知识点，返回精确的 knowledge 片段"
 
     # ============================================================
-    # Skill 标准接口：检索
+    # Skill 标准接口：两级检索
     # ============================================================
 
     def run(self, skill_input: SkillInput) -> SkillOutput:
         """
-        检索历史 wiki
-        输出 data:
-            - found: bool
-            - modules_hit: int
-            - wikis: List[Dict]  命中的 wiki 记录
-            - context_text: str  格式化的上下文文本
+        两级检索：
+        1. Module 向量检索 → 命中相关模块
+        2. Wiki summary 向量检索 → 在命中模块内找最相关的 wiki
+        3. 拿出命中 wiki 的 knowledge + summary + answer
         """
         workspace_id = skill_input.workspace_id
         query = skill_input.query
@@ -70,27 +69,82 @@ class WikiMemorySkill(BaseSkill):
 
         # 1. 向量化 query
         try:
-            vec = self.embedding.embed(query)
+            query_vec = self.embedding.embed(query)
         except Exception as e:
             logger.error("Wiki检索向量化失败: %s", e)
             return SkillOutput(success=True, data={"found": False, "wikis": [], "context_text": ""})
 
-        # 2. 搜索相关 module
-        hits = self.milvus.search_modules(workspace_id=workspace_id, query_embedding=vec, top_k=top_k)
-        hits = [h for h in hits if h["score"] >= threshold]
+        # 2. 第一级：搜索相关 module
+        module_hits = self.milvus.search_modules(
+            workspace_id=workspace_id, query_embedding=query_vec, top_k=top_k
+        )
+        module_hits = [h for h in module_hits if h["score"] >= threshold]
 
-        if not hits:
-            logger.info("Wiki检索: 无命中 (ws=%s, query=%r)", workspace_id, query[:30])
-            return SkillOutput(success=True, data={"found": False, "modules_hit": 0, "wikis": [], "context_text": ""})
+        if not module_hits:
+            logger.info("Wiki检索: 无命中模块 (ws=%s, query=%r)", workspace_id, query[:30])
+            return SkillOutput(success=True, data={
+                "found": False, "modules_hit": 0, "wikis": [], "context_text": ""
+            })
 
-        # 3. 获取命中模块下的 wiki 记录
+        # 3. 第二级：在命中模块内搜索 wiki summaries
+        module_ids = [h["module_id"] for h in module_hits]
+        wiki_hits = self.milvus.search_wiki_summaries(
+            module_ids=module_ids,
+            query_embedding=query_vec,
+            top_k=5,  # 全局取 top5 最相关的 wiki
+        )
+
+        if not wiki_hits:
+            # fallback: 如果 wiki_summaries 里没数据（可能是旧数据），用老方式全拿
+            logger.info("Wiki检索: wiki_summaries 无命中，fallback 到全量获取")
+            return self._fallback_run(module_hits, query_vec)
+
+        # 4. 根据命中的 wiki_id 拿出完整 wiki 记录
         all_wikis: List[Dict[str, Any]] = []
-        for h in hits:
+        for wh in wiki_hits:
+            wiki_record = self._get_wiki_by_id(wh["wiki_id"], wh["module_id"])
+            if wiki_record:
+                wiki_record["_wiki_score"] = wh["score"]
+                wiki_record["_wiki_summary"] = wh["summary"]
+                # 找到对应 module 的 topic
+                for mh in module_hits:
+                    if mh["module_id"] == wh["module_id"]:
+                        wiki_record["_module_topic"] = mh["topic"]
+                        wiki_record["_module_score"] = mh["score"]
+                        break
+                # 解析 knowledge JSON
+                if isinstance(wiki_record.get("knowledge"), str):
+                    import json
+                    try:
+                        wiki_record["knowledge"] = json.loads(wiki_record["knowledge"])
+                    except Exception:
+                        wiki_record["knowledge"] = []
+                all_wikis.append(wiki_record)
+
+        # 5. 格式化上下文（用 knowledge + summary，而不是完整 answer）
+        context_text = self._format_context(all_wikis)
+
+        logger.info("Wiki检索(两级): 命中 %d 模块, 精筛 %d 条wiki", len(module_hits), len(all_wikis))
+        return SkillOutput(
+            success=True,
+            data={
+                "found": True,
+                "modules_hit": len(module_hits),
+                "wikis": all_wikis,
+                "wiki_count": len(all_wikis),
+                "context_text": context_text,
+            },
+            message=f"命中 {len(module_hits)} 个模块, 精筛 {len(all_wikis)} 条wiki",
+        )
+
+    def _fallback_run(self, module_hits, query_vec) -> SkillOutput:
+        """fallback: wiki_summaries 为空时用老方式（全量获取模块下所有 wiki）"""
+        all_wikis: List[Dict[str, Any]] = []
+        for h in module_hits:
             module_wikis = self.mysql.get_wikis_by_module(h["module_id"])
             for w in module_wikis:
                 w["_module_topic"] = h["topic"]
                 w["_module_score"] = h["score"]
-                # 解析 knowledge JSON
                 if isinstance(w.get("knowledge"), str):
                     import json
                     try:
@@ -99,20 +153,25 @@ class WikiMemorySkill(BaseSkill):
                         w["knowledge"] = []
             all_wikis.extend(module_wikis)
 
-        # 4. 格式化上下文
         context_text = self._format_context(all_wikis)
-
-        logger.info("Wiki检索: 命中 %d 模块, %d 条wiki", len(hits), len(all_wikis))
         return SkillOutput(
             success=True,
             data={
-                "found": True,
-                "modules_hit": len(hits),
+                "found": bool(all_wikis),
+                "modules_hit": len(module_hits),
                 "wikis": all_wikis,
+                "wiki_count": len(all_wikis),
                 "context_text": context_text,
             },
-            message=f"命中 {len(hits)} 个话题模块, {len(all_wikis)} 条历史记录",
         )
+
+    def _get_wiki_by_id(self, wiki_id: str, module_id: str) -> Optional[Dict[str, Any]]:
+        """根据 wiki_id 从 module 的 wikis 列表中查找"""
+        wikis = self.mysql.get_wikis_by_module(module_id)
+        for w in wikis:
+            if w.get("wiki_id") == wiki_id:
+                return w
+        return None
 
     # ============================================================
     # 写入接口
@@ -123,39 +182,34 @@ class WikiMemorySkill(BaseSkill):
               match_query: str = None) -> Dict[str, Any]:
         """
         将一轮对话写入 wiki：
-        1. 判断归属模块（同话题 or 新话题）
-        2. 生成 wiki 级摘要
-        3. 写入 wiki_record（含 summary）
-        4. 更新模块 summary + 向量
-        
-        Args:
-            query: 用户原话，写入 wiki 存储（展示用）
-            match_query: 改写后的问题，用于话题归属的向量匹配（可选，默认用 query）
+        1. 判断归属模块
+        2. 生成 wiki summary（80-120字）
+        3. 写入 wiki_record
+        4. 向量化 summary 存入 Milvus wiki_summaries
+        5. 更新模块 summary + 向量
         
         Returns: {"wiki_id": str, "module_id": str, "turn_number": int, "wiki_summary": str}
         """
-        from chatwiki.config.prompts import WIKI_SUMMARY_PROMPT
-
-        # 1. 确定归属模块（用 match_query 做话题匹配，语义更完整）
+        # 1. 确定归属模块
         effective_query = match_query or query
         module_id = self._get_or_create_module(workspace_id, effective_query, is_followup=(intent == "followup_query"))
 
         # 2. 计算 turn_number
         turn_number = self.mysql.get_turn_count(workspace_id) + 1
 
-        # 3. 生成 wiki 级摘要
+        # 3. 生成 wiki summary（80-120字）
         wiki_summary = ""
         try:
             summary_prompt = WIKI_SUMMARY_PROMPT.format(
                 query=query,
-                answer=answer[:300],
+                answer=answer[:500],
             )
-            wiki_summary = self.llm.chat(summary_prompt, max_tokens=100, temperature=0.0).strip()
-            # 限制长度
-            wiki_summary = wiki_summary[:50]
+            wiki_summary = self.llm.chat(summary_prompt, max_tokens=200, temperature=0.0).strip()
+            # 限制长度 150 字（允许超出 120 一点）
+            wiki_summary = wiki_summary[:150]
         except Exception as e:
             logger.warning("Wiki摘要生成失败: %s", e)
-            wiki_summary = answer[:50] if answer else query[:30]
+            wiki_summary = f"{query}。{answer[:80]}" if answer else query[:100]
 
         # 4. 写入 wiki_record
         wiki_id = self.mysql.create_wiki(
@@ -168,11 +222,24 @@ class WikiMemorySkill(BaseSkill):
             summary=wiki_summary,
         )
 
-        # 5. 更新模块摘要 + 向量
+        # 5. 向量化 summary 存入 Milvus wiki_summaries
+        try:
+            summary_vec = self.embedding.embed(wiki_summary)
+            self.milvus.upsert_wiki_summary(
+                wiki_id=wiki_id,
+                workspace_id=workspace_id,
+                module_id=module_id,
+                summary=wiki_summary,
+                embedding=summary_vec,
+            )
+        except Exception as e:
+            logger.warning("Wiki summary 向量存储失败: %s", e)
+
+        # 6. 更新模块摘要 + 向量
         self._update_module_summary(module_id)
 
         logger.info("Wiki写入: wiki_id=%s, module_id=%s, turn=%d, summary=%r",
-                   wiki_id, module_id, turn_number, wiki_summary[:30])
+                   wiki_id, module_id, turn_number, wiki_summary[:40])
         return {"wiki_id": wiki_id, "module_id": module_id, "turn_number": turn_number,
                 "wiki_summary": wiki_summary}
 
@@ -191,10 +258,9 @@ class WikiMemorySkill(BaseSkill):
         return self.mysql.get_wikis_by_workspace(workspace_id)
 
     def get_recent_context(self, workspace_id: str, n: int = 15) -> str:
-        """获取最近 N 轮完整对话（含闲聊），从 chat_log 读取，供问题改写和闲聊回忆使用"""
+        """获取最近 N 轮完整对话（含闲聊），从 chat_log 读取"""
         logs = self.mysql.get_recent_chat_log(workspace_id, n)
         if not logs:
-            # fallback: 从 wiki_record 取
             wikis = self.mysql.get_wikis_by_workspace(workspace_id)
             if not wikis:
                 return ""
@@ -203,7 +269,7 @@ class WikiMemorySkill(BaseSkill):
         return "\n".join(f"Q: {l['query']}\nA: {l['answer'][:150]}" for l in logs)
 
     def log_chat(self, workspace_id: str, query: str, answer: str, intent: str) -> None:
-        """记录一轮对话到 chat_log（含闲聊），供问题改写参考使用"""
+        """记录一轮对话到 chat_log（含闲聊）"""
         try:
             turn = self.mysql.get_chat_log_count(workspace_id) + 1
             self.mysql.log_chat(
@@ -221,19 +287,12 @@ class WikiMemorySkill(BaseSkill):
     # ============================================================
 
     def _get_or_create_module(self, workspace_id: str, query: str, is_followup: bool = False) -> str:
-        """
-        判断归属模块：用向量相似度在所有历史模块中找最匹配的。
-        1. 向量化 query，在 Milvus 中搜索所有模块
-        2. 如果最高相似度 > topic_merge_threshold → 用 LLM 确认是否归入
-        3. LLM 确认 same → 归入该模块
-        4. 否则创建新模块
-        """
+        """判断归属模块：向量搜索所有历史模块找最匹配的"""
         modules = self.mysql.get_modules_by_workspace(workspace_id)
 
         if not modules:
             return self._create_new_module(workspace_id, query)
 
-        # 向量检索所有模块，找最相似的
         try:
             query_vec = self.embedding.embed(query)
             hits = self.milvus.search_modules(
@@ -251,16 +310,14 @@ class WikiMemorySkill(BaseSkill):
         if not hits:
             return self._create_new_module(workspace_id, query)
 
-        # 取相似度最高的模块
         best_hit = hits[0]
         best_score = best_hit["score"]
-        topic_merge_threshold = 0.55  # 向量相似度门槛：低于此值直接创建新模块
+        topic_merge_threshold = 0.55
 
         if best_score < topic_merge_threshold:
             logger.info("话题判断: 最高相似度 %.2f < %.2f，创建新模块", best_score, topic_merge_threshold)
             return self._create_new_module(workspace_id, query)
 
-        # 相似度足够高（>= 0.65），用 LLM 精确判断
         is_same = self._judge_same_topic(
             current_topic=best_hit["topic"],
             current_summary=best_hit.get("summary") or best_hit["topic"],
@@ -272,13 +329,11 @@ class WikiMemorySkill(BaseSkill):
                        best_hit["module_id"][:8], best_hit["topic"], best_score)
             return best_hit["module_id"]
 
-        # LLM 判 new，但如果相似度非常高（> 0.85）仍然归入（LLM可能判错）
         if best_score > 0.85:
             logger.info("话题判断: LLM判new但相似度 %.2f > 0.85，强制归入模块 %s",
                        best_score, best_hit["module_id"][:8])
             return best_hit["module_id"]
 
-        # 检查第二、第三命中是否有更合适的（避免只看 top1）
         for hit in hits[1:3]:
             if hit["score"] < topic_merge_threshold:
                 break
@@ -309,9 +364,7 @@ class WikiMemorySkill(BaseSkill):
         return module_id
 
     def _judge_same_topic(self, current_topic: str, current_summary: str, user_query: str) -> bool:
-        """
-        纯 LLM 判断（向量相似度已在 _get_or_create_module 中处理）
-        """
+        """纯 LLM 判断"""
         prompt = TOPIC_JUDGE_PROMPT.format(
             current_topic=current_topic,
             current_summary=current_summary[:500],
@@ -323,7 +376,7 @@ class WikiMemorySkill(BaseSkill):
             return "same" in last_line
         except Exception as e:
             logger.warning("话题判断LLM调用失败: %s", e)
-            return True  # 失败时保守归到当前模块
+            return True
 
     def _update_module_summary(self, module_id: str) -> None:
         module = self.mysql.get_module(module_id)
@@ -358,6 +411,7 @@ class WikiMemorySkill(BaseSkill):
             logger.error("模块向量更新失败: %s", e)
 
     def _format_context(self, wikis: List[Dict[str, Any]]) -> str:
+        """格式化检索结果：优先展示 knowledge，辅以 summary"""
         if not wikis:
             return ""
         parts = []
@@ -367,21 +421,25 @@ class WikiMemorySkill(BaseSkill):
             if module_topic != current_module:
                 current_module = module_topic
                 score = w.get("_module_score", 0)
-                parts.append(f"\n--- 话题: {module_topic} (相关度: {score:.2f}) ---")
-            # 优先用 wiki summary，没有就截取 answer
-            wiki_summary = w.get("summary", "")
+                parts.append(f"\n--- 话题: {module_topic} (模块相关度: {score:.2f}) ---")
+
+            wiki_score = w.get("_wiki_score", 0)
+            wiki_summary = w.get("_wiki_summary") or w.get("summary", "")
+            parts.append(f"  [第{w['turn_number']}轮 | wiki相关度: {wiki_score:.2f}]")
+            parts.append(f"  问题: {w['query']}")
             if wiki_summary:
-                parts.append(
-                    f"  [第{w['turn_number']}轮] Q: {w['query']}\n"
-                    f"  摘要: {wiki_summary}\n"
-                    f"  A: {w['answer'][:200]}"
-                )
-            else:
-                parts.append(
-                    f"  [第{w['turn_number']}轮] Q: {w['query']}\n"
-                    f"  A: {w['answer'][:300]}"
-                )
+                parts.append(f"  摘要: {wiki_summary}")
+
+            # 展示 knowledge（核心价值）
             knowledge = w.get("knowledge") or []
             if knowledge:
-                parts.append("  参考知识: " + " | ".join(str(k)[:100] for k in knowledge[:3]))
+                parts.append("  相关知识:")
+                for k in knowledge[:3]:
+                    parts.append(f"    - {str(k)[:200]}")
+
+            # 兜底：如果没有 knowledge，展示 answer 片段
+            if not knowledge:
+                parts.append(f"  回答: {w['answer'][:300]}")
+            parts.append("")
+
         return "\n".join(parts)
