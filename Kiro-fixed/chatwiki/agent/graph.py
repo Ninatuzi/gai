@@ -97,14 +97,17 @@ def make_nodes(skills: Dict[str, Any]) -> Dict[str, Any]:
 
         wiki_skill = _skill("history_memory")
         recent_modules = []
+        recent_chat = ""
         if wiki_skill:
             modules = wiki_skill.get_modules(state["workspace_id"])
             recent_modules = [m["topic"] for m in modules[:5]]
+            # 提供最近 5 轮对话帮助意图判断（区分闲聊追问 vs 知识追问）
+            recent_chat = wiki_skill.get_recent_context(state["workspace_id"], n=5)
 
         inp = SkillInput(
             query=state["query"],
             workspace_id=state["workspace_id"],
-            context={"recent_modules": recent_modules},
+            context={"recent_modules": recent_modules, "recent_chat": recent_chat},
         )
         out = skill.run(inp)
         intent = out.data.get("intent", "knowledge_query")
@@ -150,12 +153,15 @@ def make_nodes(skills: Dict[str, Any]) -> Dict[str, Any]:
         wiki_skill = _skill("history_memory")
         recent_context = ""
         if wiki_skill:
-            recent_context = wiki_skill.get_recent_context(state["workspace_id"], n=3)
+            recent_context = wiki_skill.get_recent_context(state["workspace_id"], n=5)
 
         inp = SkillInput(
             query=state["query"],
             workspace_id=state["workspace_id"],
-            context={"recent_context": recent_context},
+            context={
+                "recent_context": recent_context,
+                "intent": state.get("intent", "knowledge_query"),
+            },
         )
         out = skill.run(inp)
         steps.append("query_rewrite")
@@ -270,6 +276,7 @@ def make_nodes(skills: Dict[str, Any]) -> Dict[str, Any]:
             answer=state.get("answer", ""),
             knowledge=knowledge,
             intent=state.get("intent", "knowledge_query"),
+            match_query=state.get("rewritten_query"),
         )
         module_id = result.get("module_id")
         steps.append(f"wiki_write:module={module_id[:8] if module_id else 'N/A'}")
@@ -374,15 +381,8 @@ def build_graph(skills: Dict[str, Any]):
     # 知识问答路径：改写 → wiki 检索
     builder.add_edge("node_query_rewrite", "node_wiki_search")
 
-    # Wiki 路由：命中 → 聚合，未命中 → RAG → 聚合
-    builder.add_conditional_edges(
-        "node_wiki_search",
-        route_by_wiki,
-        {
-            "wiki_hit": "node_aggregate",
-            "need_rag": "node_rag",
-        },
-    )
+    # Wiki 检索后无论是否命中，都走 RAG 补充
+    builder.add_edge("node_wiki_search", "node_rag")
     builder.add_edge("node_rag", "node_aggregate")
 
     # 聚合 → 写入 wiki → log_chat → END

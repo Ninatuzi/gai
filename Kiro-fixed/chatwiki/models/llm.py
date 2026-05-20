@@ -64,6 +64,42 @@ class LLMClient:
                 raise
         raise ValueError(f"无法从LLM输出中提取JSON: {text[:200]!r}")
 
+    def chat_stream(self, prompt: str, system: Optional[str] = None,
+                    temperature: Optional[float] = None, max_tokens: Optional[int] = None):
+        """流式输出，yield 每个 token（已去除 <think> 块）"""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        resp = self._client.chat.completions.create(
+            model=self.cfg.model_name,
+            messages=messages,
+            temperature=self.cfg.temperature if temperature is None else temperature,
+            max_tokens=self.cfg.max_tokens if max_tokens is None else max_tokens,
+            stream=True,
+        )
+        in_think = False
+        for chunk in resp:
+            delta = chunk.choices[0].delta.content or ""
+            if not delta:
+                continue
+            # 跳过 <think>...</think> 块
+            if "<think>" in delta:
+                in_think = True
+                # 处理 <think> 之前的部分
+                before = delta.split("<think>")[0]
+                if before:
+                    yield before
+                continue
+            if in_think:
+                if "</think>" in delta:
+                    in_think = False
+                    after = delta.split("</think>", 1)[1]
+                    if after:
+                        yield after
+                continue
+            yield delta
+
     def health_check(self) -> bool:
         try:
             out = self.chat("回复ok", max_tokens=20)

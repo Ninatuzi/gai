@@ -119,6 +119,95 @@ class ChatWikiAgent:
             "steps": [],
         })
 
+    def ask_stream(self, workspace_id: str, query: str):
+        """
+        流式版本：手动执行前面步骤，聚合阶段流式输出 token。
+        避免跑完整 graph（会多一次非流式聚合+写入）。
+        
+        Yields: (token: str, is_final: bool, result: dict|None)
+            - 流式输出时: (token, False, None)
+            - 最后一次: ("", True, full_result_dict)
+        """
+        from chatwiki.skills.base import SkillInput
+        from chatwiki.agent.graph import make_nodes
+
+        # 手动构建节点函数
+        nodes = make_nodes(self._skills)
+        
+        # 初始状态
+        state = {
+            "workspace_id": workspace_id,
+            "query": query,
+            "steps": [],
+        }
+
+        # Step 1: 意图识别
+        state.update(nodes["node_intent"](state))
+
+        # 如果是闲聊，走 fallback 直接返回
+        if state.get("intent") == "chitchat":
+            state.update(nodes["node_fallback"](state))
+            nodes["node_log_chat"](state)
+            yield state.get("answer", ""), True, state
+            return
+
+        # Step 2: 问题改写
+        state.update(nodes["node_query_rewrite"](state))
+
+        # Step 3: Wiki 检索
+        state.update(nodes["node_wiki_search"](state))
+
+        # Step 4: RAG 检索
+        state.update(nodes["node_rag"](state))
+
+        # Step 5: 流式聚合（只执行一次）
+        inp = SkillInput(
+            query=query,
+            workspace_id=workspace_id,
+            context={
+                "wiki_context": state.get("wiki_context", ""),
+                "rag_context": state.get("rag_context", ""),
+            },
+        )
+
+        full_answer = ""
+        for token in self.aggregator_skill.run_stream(inp):
+            full_answer += token
+            yield token, False, None
+
+        state["answer"] = full_answer
+        steps = list(state.get("steps") or [])
+        steps.append("aggregation")
+        state["steps"] = steps
+
+        # Step 6: 写入 Wiki
+        rag_chunks = state.get("rag_chunks") or []
+        knowledge = [c.get("content", "") for c in rag_chunks if c.get("content")][:5] if state.get("rag_found") else []
+
+        write_result = self.wiki_skill.write(
+            workspace_id=workspace_id,
+            query=query,
+            answer=full_answer,
+            knowledge=knowledge,
+            intent=state.get("intent", "knowledge_query"),
+            match_query=state.get("rewritten_query"),
+        )
+        state["wiki_id"] = write_result.get("wiki_id")
+        state["module_id"] = write_result.get("module_id")
+        state["turn_number"] = write_result.get("turn_number", 0)
+        steps.append(f"wiki_write:module={write_result.get('module_id', '')[:8]}")
+        state["steps"] = steps
+
+        # Step 7: 记录 chat_log
+        self.wiki_skill.log_chat(
+            workspace_id=workspace_id,
+            query=query,
+            answer=full_answer,
+            intent=state.get("intent", ""),
+        )
+
+        yield "", True, state
+
     # ============================================================
     # 数据查看
     # ============================================================
