@@ -86,6 +86,9 @@ class WikiMemorySkill(BaseSkill):
                 "found": False, "modules_hit": 0, "wikis": [], "context_text": ""
             })
 
+        # 2.5 动态截断：如果第一名遥遥领先，只保留得分接近的模块
+        module_hits = self._dynamic_truncate_modules(module_hits)
+
         # 3. 第二级：在命中模块内搜索 wiki summaries
         module_ids = [h["module_id"] for h in module_hits]
         wiki_hits = self.milvus.search_wiki_summaries(
@@ -362,6 +365,32 @@ class WikiMemorySkill(BaseSkill):
             logger.warning("初始模块向量创建失败: %s", e)
         logger.info("创建新模块: id=%s, topic=%s", module_id, topic)
         return module_id
+
+    def _dynamic_truncate_modules(self, module_hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        动态截断模块召回列表：
+        - 如果第一名远超其他模块（分差 > score_gap_threshold），只保留第一名
+        - 否则保留所有得分与第一名差距在 score_gap_threshold 以内的模块
+        
+        避免同领域弱相关模块被大量召回，减少第二级搜索噪音。
+        """
+        if len(module_hits) <= 1:
+            return module_hits
+
+        gap_threshold = self.settings.retrieval.score_gap_threshold
+        best_score = module_hits[0]["score"]
+
+        # 保留与第一名得分差距在阈值内的模块
+        truncated = [h for h in module_hits if (best_score - h["score"]) <= gap_threshold]
+
+        if len(truncated) < len(module_hits):
+            logger.info(
+                "模块动态截断: %d → %d (best=%.2f, gap_threshold=%.2f, 淘汰: %s)",
+                len(module_hits), len(truncated), best_score, gap_threshold,
+                ", ".join(f"{h['topic']}({h['score']:.2f})" for h in module_hits if h not in truncated),
+            )
+
+        return truncated
 
     def _judge_same_topic(self, current_topic: str, current_summary: str, user_query: str) -> bool:
         """纯 LLM 判断"""

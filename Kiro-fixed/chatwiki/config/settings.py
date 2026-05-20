@@ -46,6 +46,8 @@ class RetrievalConfig:
     """检索配置"""
     top_k: int = 5
     similarity_threshold: float = 0.5
+    # 动态截断：第一名与后续模块的分差超过此值时，只保留领先的模块
+    score_gap_threshold: float = 0.15
 
 
 @dataclass
