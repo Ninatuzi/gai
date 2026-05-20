@@ -151,6 +151,9 @@ def chat_fn_stream(user_message, chat_history, workspace_id):
     wiki_hit_str = "未命中"
     if result.get("wiki_found"):
         wiki_hit_str = f"命中 {result.get('wiki_modules_hit', 0)} 模块 / {result.get('wiki_count', 0)} 条wiki"
+        # 如果有 wiki_summary，附加显示
+        if result.get("wiki_summary"):
+            wiki_hit_str += f"\n最新: {result.get('wiki_summary', '')[:40]}"
 
     if result.get("intent") == "chitchat":
         rag_hit_str = "未调用（闲聊）"
@@ -323,7 +326,7 @@ def build_app():
                 intent_display = gr.Textbox(label="意图识别", interactive=False, max_lines=1)
                 rewrite_display = gr.Textbox(label="问题改写/增强", interactive=False, max_lines=2)
                 with gr.Row():
-                    wiki_display = gr.Textbox(label="Wiki 命中", interactive=False, max_lines=1)
+                    wiki_display = gr.Textbox(label="Wiki 命中", interactive=False, max_lines=2)
                     rag_display = gr.Textbox(label="RAG 命中", interactive=False, max_lines=1)
                 with gr.Row():
                     module_display = gr.Textbox(label="归属模块", interactive=False, max_lines=1)
