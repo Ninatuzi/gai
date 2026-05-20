@@ -214,7 +214,8 @@ class JSONClient:
     # ============================================================
 
     def create_wiki(self, workspace_id: str, module_id: str, turn_number: int,
-                    query: str, answer: str, knowledge: List[str]) -> str:
+                    query: str, answer: str, knowledge: List[str],
+                    summary: str = "") -> str:
         wid = str(uuid.uuid4())
         data = self._load(workspace_id)
         for m in data["modules"]:
@@ -225,6 +226,7 @@ class JSONClient:
                     "query": query,
                     "answer": answer,
                     "knowledge": knowledge,
+                    "summary": summary,
                     "created_at": datetime.now().isoformat(),
                 })
                 m["wiki_count"] = len(m["wikis"])

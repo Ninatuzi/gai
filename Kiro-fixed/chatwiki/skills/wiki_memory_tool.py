@@ -124,15 +124,18 @@ class WikiMemorySkill(BaseSkill):
         """
         将一轮对话写入 wiki：
         1. 判断归属模块（同话题 or 新话题）
-        2. 写入 wiki_record
-        3. 更新模块 summary + 向量
+        2. 生成 wiki 级摘要
+        3. 写入 wiki_record（含 summary）
+        4. 更新模块 summary + 向量
         
         Args:
             query: 用户原话，写入 wiki 存储（展示用）
             match_query: 改写后的问题，用于话题归属的向量匹配（可选，默认用 query）
         
-        Returns: {"wiki_id": str, "module_id": str, "turn_number": int}
+        Returns: {"wiki_id": str, "module_id": str, "turn_number": int, "wiki_summary": str}
         """
+        from chatwiki.config.prompts import WIKI_SUMMARY_PROMPT
+
         # 1. 确定归属模块（用 match_query 做话题匹配，语义更完整）
         effective_query = match_query or query
         module_id = self._get_or_create_module(workspace_id, effective_query, is_followup=(intent == "followup_query"))
@@ -140,7 +143,21 @@ class WikiMemorySkill(BaseSkill):
         # 2. 计算 turn_number
         turn_number = self.mysql.get_turn_count(workspace_id) + 1
 
-        # 3. 写入 wiki_record
+        # 3. 生成 wiki 级摘要
+        wiki_summary = ""
+        try:
+            summary_prompt = WIKI_SUMMARY_PROMPT.format(
+                query=query,
+                answer=answer[:300],
+            )
+            wiki_summary = self.llm.chat(summary_prompt, max_tokens=100, temperature=0.0).strip()
+            # 限制长度
+            wiki_summary = wiki_summary[:50]
+        except Exception as e:
+            logger.warning("Wiki摘要生成失败: %s", e)
+            wiki_summary = answer[:50] if answer else query[:30]
+
+        # 4. 写入 wiki_record
         wiki_id = self.mysql.create_wiki(
             workspace_id=workspace_id,
             module_id=module_id,
@@ -148,13 +165,16 @@ class WikiMemorySkill(BaseSkill):
             query=query,
             answer=answer,
             knowledge=knowledge,
+            summary=wiki_summary,
         )
 
-        # 4. 更新模块摘要 + 向量
+        # 5. 更新模块摘要 + 向量
         self._update_module_summary(module_id)
 
-        logger.info("Wiki写入: wiki_id=%s, module_id=%s, turn=%d", wiki_id, module_id, turn_number)
-        return {"wiki_id": wiki_id, "module_id": module_id, "turn_number": turn_number}
+        logger.info("Wiki写入: wiki_id=%s, module_id=%s, turn=%d, summary=%r",
+                   wiki_id, module_id, turn_number, wiki_summary[:30])
+        return {"wiki_id": wiki_id, "module_id": module_id, "turn_number": turn_number,
+                "wiki_summary": wiki_summary}
 
     # ============================================================
     # 查询接口
@@ -348,13 +368,20 @@ class WikiMemorySkill(BaseSkill):
                 current_module = module_topic
                 score = w.get("_module_score", 0)
                 parts.append(f"\n--- 话题: {module_topic} (相关度: {score:.2f}) ---")
-            knowledge_str = ""
+            # 优先用 wiki summary，没有就截取 answer
+            wiki_summary = w.get("summary", "")
+            if wiki_summary:
+                parts.append(
+                    f"  [第{w['turn_number']}轮] Q: {w['query']}\n"
+                    f"  摘要: {wiki_summary}\n"
+                    f"  A: {w['answer'][:200]}"
+                )
+            else:
+                parts.append(
+                    f"  [第{w['turn_number']}轮] Q: {w['query']}\n"
+                    f"  A: {w['answer'][:300]}"
+                )
             knowledge = w.get("knowledge") or []
             if knowledge:
-                knowledge_str = "\n  参考知识: " + " | ".join(str(k)[:100] for k in knowledge[:3])
-            parts.append(
-                f"  [第{w['turn_number']}轮] Q: {w['query']}\n"
-                f"  A: {w['answer'][:300]}"
-                f"{knowledge_str}"
-            )
+                parts.append("  参考知识: " + " | ".join(str(k)[:100] for k in knowledge[:3]))
         return "\n".join(parts)
