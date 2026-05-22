@@ -354,4 +354,4 @@ if __name__ == "__main__":
     # 预初始化 Agent（避免第一次请求慢）
     get_agent()
     logger.info("ChatWiki API 启动中...")
-    uvicorn.run(app, host="0.0.0.0", port=8686)
+    uvicorn.run(app, host="0.0.0.0", port=7001)
