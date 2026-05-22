@@ -200,22 +200,33 @@ class WikiMemorySkill(BaseSkill):
         # 2. 计算 turn_number
         turn_number = self.mysql.get_turn_count(workspace_id) + 1
 
+        # 2.5 过滤 answer 中的 <think> 标签（DeepSeek 输出可能带思考过程）
+        import re
+        clean_answer = re.sub(r'<think>[\s\S]*?</think>', '', answer, flags=re.DOTALL).strip()
+        # 兜底：如果没有闭合的 </think>，去掉 <think> 及之后的所有内容直到正文开始
+        if '<think>' in clean_answer:
+            clean_answer = re.sub(r'<think>[\s\S]*', '', clean_answer).strip()
+        # 如果过滤后为空（整个回答都是 think），保留原文
+        if not clean_answer:
+            clean_answer = answer
+
         # 3. 生成 wiki summary（80-120字）
         wiki_summary = ""
         try:
             summary_prompt = WIKI_SUMMARY_PROMPT.format(
                 query=query,
-                answer=answer[:500],
+                answer=clean_answer[:500],
             )
             wiki_summary = self.llm.chat(summary_prompt, max_tokens=200, temperature=0.0).strip()
-            # 过滤 DeepSeek 的 <think> 思考标签
-            import re
-            wiki_summary = re.sub(r'<think>.*?</think>', '', wiki_summary, flags=re.DOTALL).strip()
+            # 过滤 summary 中的 <think> 标签
+            wiki_summary = re.sub(r'<think>[\s\S]*?</think>', '', wiki_summary, flags=re.DOTALL).strip()
+            if '<think>' in wiki_summary:
+                wiki_summary = re.sub(r'<think>[\s\S]*', '', wiki_summary).strip()
             # 限制长度 150 字（允许超出 120 一点）
             wiki_summary = wiki_summary[:150]
         except Exception as e:
             logger.warning("Wiki摘要生成失败: %s", e)
-            wiki_summary = f"{query}。{answer[:80]}" if answer else query[:100]
+            wiki_summary = f"{query}。{clean_answer[:80]}" if clean_answer else query[:100]
 
         # 4. 写入 wiki_record
         wiki_id = self.mysql.create_wiki(
@@ -223,7 +234,7 @@ class WikiMemorySkill(BaseSkill):
             module_id=module_id,
             turn_number=turn_number,
             query=query,
-            answer=answer,
+            answer=clean_answer,
             knowledge=knowledge,
             summary=wiki_summary,
         )
