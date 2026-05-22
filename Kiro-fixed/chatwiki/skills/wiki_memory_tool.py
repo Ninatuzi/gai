@@ -208,6 +208,9 @@ class WikiMemorySkill(BaseSkill):
                 answer=answer[:500],
             )
             wiki_summary = self.llm.chat(summary_prompt, max_tokens=200, temperature=0.0).strip()
+            # 过滤 DeepSeek 的 <think> 思考标签
+            import re
+            wiki_summary = re.sub(r'<think>.*?</think>', '', wiki_summary, flags=re.DOTALL).strip()
             # 限制长度 150 字（允许超出 120 一点）
             wiki_summary = wiki_summary[:150]
         except Exception as e:
