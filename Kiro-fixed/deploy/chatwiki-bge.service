@@ -1,0 +1,13 @@
+[Unit]
+Description=BGE-M3 Embedding Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/embedding_model
+ExecStart=/usr/bin/vllm serve /root/embedding_model/bge-m3 --port 8001 --api-key qwertyuiop1A. --gpu-memory-utilization 0.7 --task embed
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

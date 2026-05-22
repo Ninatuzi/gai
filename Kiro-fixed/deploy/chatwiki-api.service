@@ -1,0 +1,15 @@
+[Unit]
+Description=ChatWiki API Service
+After=network.target chatwiki-bge.service
+Wants=chatwiki-bge.service
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/Kiro-fixed
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/python api_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
