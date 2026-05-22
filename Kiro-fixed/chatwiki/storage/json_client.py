@@ -93,6 +93,20 @@ class JSONClient:
         self._save(wid, data)
         return wid
 
+    def ensure_workspace(self, workspace_id: str) -> str:
+        """
+        确保 workspace 存在：如果已存在则直接返回，不存在则以 workspace_id 为 ID 创建。
+        适用于 Dify 直接传 conversation_id 作为 workspace_id 的场景。
+        """
+        path = self._get_path(workspace_id)
+        if os.path.exists(path):
+            return workspace_id
+        # 不存在则创建，用 workspace_id 本身作为 chat_id
+        data = self._new_workspace_data(workspace_id, chat_id=workspace_id)
+        self._save(workspace_id, data)
+        logger.info("自动创建 workspace: %s", workspace_id)
+        return workspace_id
+
     def get_workspace_by_chat(self, chat_id: str) -> Optional[Dict[str, Any]]:
         """遍历所有文件找到匹配的 chat_id"""
         for fname in os.listdir(self.data_dir):

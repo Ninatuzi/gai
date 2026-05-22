@@ -151,6 +151,9 @@ async def api_intent(req: IntentRequest):
     t0 = time.time()
 
     try:
+        # 自动确保 workspace 存在
+        ag.wiki_skill.mysql.ensure_workspace(req.workspace_id)
+
         # 获取上下文信息
         modules = ag.wiki_skill.get_modules(req.workspace_id)
         recent_modules = [m["topic"] for m in modules[:5]]
@@ -200,6 +203,9 @@ async def api_memory_search(req: MemorySearchRequest):
     t0 = time.time()
 
     try:
+        # 自动确保 workspace 存在
+        ag.wiki_skill.mysql.ensure_workspace(req.workspace_id)
+
         inp = SkillInput(query=req.query, workspace_id=req.workspace_id)
         out = ag.wiki_skill.run(inp)
 
@@ -261,6 +267,9 @@ async def api_memory_write(req: MemoryWriteRequest):
     t0 = time.time()
 
     try:
+        # 自动确保 workspace 存在
+        ag.wiki_skill.mysql.ensure_workspace(req.workspace_id)
+
         # 无论什么意图，都记录 chat_log
         ag.wiki_skill.log_chat(
             workspace_id=req.workspace_id,
