@@ -279,11 +279,19 @@ async def api_memory_write(req: MemoryWriteRequest):
         # 自动确保 workspace 存在
         ag.wiki_skill.mysql.ensure_workspace(req.workspace_id)
 
-        # 无论什么意图，都记录 chat_log
+        # 过滤 answer 中的 <think> 标签再存入 chat_log
+        import re
+        clean_answer = re.sub(r'<think>[\s\S]*?</think>', '', req.answer, flags=re.DOTALL).strip()
+        if '<think>' in clean_answer:
+            clean_answer = re.sub(r'<think>[\s\S]*', '', clean_answer).strip()
+        if not clean_answer:
+            clean_answer = req.answer
+
+        # 无论什么意图，都记录 chat_log（用过滤后的 answer）
         ag.wiki_skill.log_chat(
             workspace_id=req.workspace_id,
             query=req.query,
-            answer=req.answer,
+            answer=clean_answer,
             intent=req.intent,
         )
 
