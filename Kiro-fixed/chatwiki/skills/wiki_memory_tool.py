@@ -224,6 +224,9 @@ class WikiMemorySkill(BaseSkill):
                 wiki_summary = re.sub(r'<think>[\s\S]*', '', wiki_summary).strip()
             # 限制长度 150 字（允许超出 120 一点）
             wiki_summary = wiki_summary[:150]
+            # 如果过滤后为空（LLM 整段输出都是 think），用兜底摘要
+            if not wiki_summary:
+                wiki_summary = f"{query}。{clean_answer[:80]}" if clean_answer else query[:100]
         except Exception as e:
             logger.warning("Wiki摘要生成失败: %s", e)
             wiki_summary = f"{query}。{clean_answer[:80]}" if clean_answer else query[:100]
