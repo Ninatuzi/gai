@@ -217,7 +217,7 @@ class WikiMemorySkill(BaseSkill):
                 query=query,
                 answer=clean_answer[:500],
             )
-            wiki_summary = self.llm.chat(summary_prompt, max_tokens=200, temperature=0.0).strip()
+            wiki_summary = self.llm.chat(summary_prompt, max_tokens=300, temperature=0.0).strip()
             # 过滤 summary 中的 <think> 标签
             wiki_summary = re.sub(r'<think>[\s\S]*?</think>', '', wiki_summary, flags=re.DOTALL).strip()
             if '<think>' in wiki_summary:
