@@ -215,6 +215,15 @@ async def api_memory_search(req: MemorySearchRequest):
         context_text = out.data.get("context_text", "")
         wikis = out.data.get("wikis", [])
 
+        # Fallback：向量检索没命中时，返回最近几轮原始对话作为上下文
+        # 解决"把刚才的内容整理成表格"等操作指令语义搜不到的问题
+        if not found and not context_text:
+            recent_context = ag.wiki_skill.get_recent_context(req.workspace_id, n=5)
+            if recent_context:
+                context_text = recent_context
+                found = True
+                logger.info("记忆检索 fallback: 向量未命中，返回最近5轮对话")
+
         # 转换为响应格式
         results = []
         for w in wikis:
