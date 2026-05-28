@@ -255,8 +255,13 @@ class WikiMemorySkill(BaseSkill):
         except Exception as e:
             logger.warning("Wiki summary 向量存储失败: %s", e)
 
-        # 6. 更新模块摘要 + 向量
-        self._update_module_summary(module_id)
+        # 6. 异步更新模块摘要 + 向量（不阻塞响应，节省 5-10s）
+        import threading
+        threading.Thread(
+            target=self._update_module_summary,
+            args=(module_id,),
+            daemon=True,
+        ).start()
 
         logger.info("Wiki写入: wiki_id=%s, module_id=%s, turn=%d, summary=%r",
                    wiki_id, module_id, turn_number, wiki_summary[:40])
