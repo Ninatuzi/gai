@@ -21,7 +21,7 @@ echo "════════════════════════�
 if lsof -i:8001 > /dev/null 2>&1; then
     echo "  ⚠️  端口 8001 已被占用，BGE 可能已在运行，跳过"
 else
-    nohup vllm serve /root/embedding_model/bge-m3 \
+    nohup /root/anaconda3/envs/byx_1/bin/vllm serve /root/embedding_model/bge-m3 \
         --port 8001 \
         --api-key qwertyuiop1A. \
         --gpu-memory-utilization 0.7 \
@@ -56,17 +56,17 @@ echo "════════════════════════�
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if lsof -i:8686 > /dev/null 2>&1; then
-    echo "  ⚠️  端口 8686 已被占用，API 可能已在运行，跳过"
+if lsof -i:7001 > /dev/null 2>&1; then
+    echo "  ⚠️  端口 7001 已被占用，API 可能已在运行，跳过"
 else
     cd "$SCRIPT_DIR"
-    nohup python api_server.py > $LOG_DIR/api.log 2>&1 &
+    nohup /root/anaconda3/envs/byx_1/bin/python api_server.py > $LOG_DIR/api.log 2>&1 &
 
     echo "  API PID: $!"
     echo "  日志: $LOG_DIR/api.log"
 
     sleep 3
-    if lsof -i:8686 > /dev/null 2>&1; then
+    if lsof -i:7001 > /dev/null 2>&1; then
         echo "  ✅ ChatWiki API 已启动"
     else
         echo "  ⚠️  API 可能还在初始化，请查看日志"
@@ -82,8 +82,8 @@ echo "════════════════════════�
 echo "✅ 所有服务已启动"
 echo ""
 echo "  BGE-M3 Embedding:  http://10.7.10.102:8001"
-echo "  ChatWiki API:      http://xx.x.x.xx:8686"
-echo "  API 文档:          http://xx.x.x.xx:8686/docs"
+echo "  ChatWiki API:      http://10.7.10.102:7001"
+echo "  API 文档:          http://10.7.10.102:7001/docs"
 echo ""
 echo "  查看日志:"
 echo "    tail -f $LOG_DIR/bge.log"

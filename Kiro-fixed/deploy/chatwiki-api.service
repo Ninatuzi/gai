@@ -5,9 +5,9 @@ Wants=chatwiki-bge.service
 
 [Service]
 Type=simple
-WorkingDirectory=/path/to/Kiro-fixed
+WorkingDirectory=/root/BYX_F/Kiro-fixed
 ExecStartPre=/bin/sleep 30
-ExecStart=/usr/bin/python api_server.py
+ExecStart=/root/anaconda3/envs/byx_1/bin/python api_server.py
 Restart=always
 RestartSec=5
 
