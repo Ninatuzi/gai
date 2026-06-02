@@ -5,7 +5,7 @@ ChatWiki API 服务
 启动：
     python api_server.py
     或
-    uvicorn api_server:app --host 0.0.0.0 --port 8686 --reload
+    uvicorn api_server:app --host 0.0.0.0 --port 7002 --reload
 
 接口列表：
     POST /api/intent          意图识别（判断是否应关联上下文）
@@ -380,4 +380,4 @@ if __name__ == "__main__":
     # 预初始化 Agent（避免第一次请求慢）
     get_agent()
     logger.info("ChatWiki API 启动中...")
-    uvicorn.run(app, host="0.0.0.0", port=7001)
+    uvicorn.run(app, host="0.0.0.0", port=7002)
