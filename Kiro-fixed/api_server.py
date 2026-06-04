@@ -304,39 +304,32 @@ async def api_memory_write(req: MemoryWriteRequest):
                 message="闲聊已记录到chat_log，未写入wiki",
             )
 
-        # 知识问答：写入 wiki
-        write_result = ag.wiki_skill.write(
-            workspace_id=req.workspace_id,
-            query=req.query,
-            answer=req.answer,
-            knowledge=req.knowledge,
-            intent=req.intent,
-        )
+        # 知识问答：写入 wiki（后台异步执行，不阻塞响应）
+        # wiki.write 内部含 2 次 LLM 调用（话题判断 + 摘要生成），约 15-17s。
+        # Dify 不使用本接口返回的 wiki_id/summary，且 chat_log 已同步写入
+        # （memory/search 有 fallback 读 chat_log），所以这里丢到后台即可。
+        import threading
 
-        module_id = write_result.get("module_id", "")
-        wiki_id = write_result.get("wiki_id", "")
-        turn_number = write_result.get("turn_number", 0)
-        wiki_summary = write_result.get("wiki_summary", "")
+        def _bg_write():
+            try:
+                ag.wiki_skill.write(
+                    workspace_id=req.workspace_id,
+                    query=req.query,
+                    answer=req.answer,
+                    knowledge=req.knowledge,
+                    intent=req.intent,
+                )
+            except Exception as e:
+                logger.error("后台写入wiki失败: %s", e)
 
-        # 获取模块话题名
-        module_topic = ""
-        if module_id:
-            module = ag.wiki_skill.mysql.get_module(module_id)
-            if module:
-                module_topic = module.get("topic", "")
+        threading.Thread(target=_bg_write, daemon=True).start()
 
         elapsed = time.time() - t0
-        logger.info("记录对话(wiki): query=%r, module=%s, turn=%d, %.2fs",
-                   req.query[:30], module_topic, turn_number, elapsed)
+        logger.info("记录对话(wiki): query=%r, 已提交后台写入, %.2fs", req.query[:30], elapsed)
 
         return MemoryWriteResponse(
             success=True,
-            module_id=module_id,
-            module_topic=module_topic,
-            wiki_id=wiki_id,
-            turn_number=turn_number,
-            wiki_summary=wiki_summary,
-            message=f"已归入模块[{module_topic}]",
+            message="已记录chat_log，wiki写入后台进行中",
         )
 
     except Exception as e:
